@@ -354,7 +354,7 @@ def populate_multiples(sql_db_name, n=0):
     
         if query == []:
             print(f'No data for {ticker}', '\n')
-            return
+            continue
     
         df_columns = ['Ticker', 'Date', 'PeportMonth', 'P/S', 'P/E']
         df = pd.DataFrame(query, columns=df_columns)
