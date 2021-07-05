@@ -3,6 +3,8 @@ from sqlite3 import Error
 from yahoo_fin import stock_info as si
 import pandas as pd
 import numpy as np
+from tqdm.notebook import tqdm
+import datetime
 
 #get only digits
 def get_digits(word):
@@ -19,6 +21,23 @@ def get_digits(word):
             only_digits = only_digits + word[i]
             
     return int(only_digits)
+
+
+#make a column in df with a rank of another column
+def column_rank(df, column_name):
+    max_r = np.percentile(df[column_name], 95)
+    min_r = df[column_name].min()
+
+    for index, row in df.iterrows():
+        cur_pe = df.loc[index, column_name]
+        if cur_pe > max_r:
+            cur_pe = max_r
+    
+        if cur_pe != min_r:
+            rank = (cur_pe - min_r)/(max_r-min_r)
+        else:
+            rank = 0
+        df.loc[index, f'{column_name} Rank'] = rank
 
 #create a new sql_db with a certain name
 def create_sql_db(sql_db_name):
@@ -155,7 +174,7 @@ def update_financials_macrotrends(sql_db_name, n=0):
             ticker = 'BRK-B'
     
         for i in tqdm(range(df.shape[0])): #fh.shape[0]
-            date, r, n, s = df.index[i], df['Revenue'][i], df['Income'][i], df['Shares'][i]
+            date, r, n, s = df.index[i], get_digits(df['Revenue'][i]), get_digits(df['Income'][i]), get_digits(df['Shares'][i])
             cur.execute('''INSERT OR REPLACE INTO Financials (Ticker, Date, Revenue, NetIncome, Shares)
                         VALUES (?,?,?,?,?)''', (ticker, date, r, n, s, ))
             conn.commit()
@@ -246,3 +265,80 @@ def get_stock_pe_chart(ticker):
     conn.close()
     
     return df['P/E'].plot()
+
+
+#populate table "Multiples" with calculated multipliers
+def populate_multiples(ticker):
+    
+    sql_db_name = 'stocks'
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
+    cur = conn.cursor()
+    
+    query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, Close/SPS as PS, Close/EPS as PE
+    from (select
+    t1.Ticker,
+    t1.MD_Date,
+    t1.Close,
+	t2.P_Date,
+	first_value(t2.RevTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as RevTTM,
+	first_value(t2.SPS) over(partition by t2.P_Date order by t2.P_Date DESC) as SPS,
+	first_value(t2.NetIncomeTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as NetIncomeTTM,
+	first_value(t2.EPS) over(partition by t2.P_Date order by t2.P_Date DESC) as EPS
+    from Prices as t1, Financials as t2
+    where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ?
+    order by t1.MD_Date DESC, t2.P_Date DESC)
+    group by MD_Date
+    order by MD_Date desc''', (ticker,)).fetchall()
+    
+    df_columns = ['Ticker', 'Date', 'PeportMonth', 'P/S', 'P/E']
+    df = pd.DataFrame(query, columns=df_columns)
+    df.set_index('Date', inplace=True)
+
+    column_rank(df, 'P/S')
+    column_rank(df, 'P/E')
+    
+    for i in tqdm(range(df.shape[0])): #fh.shape[0]
+        date, pe, per, ps, pes = df.index[i], df['P/E'][i], df['P/E Rank'][i], df['P/S'][i], df['P/S Rank'][i]
+        cur.execute('''INSERT OR REPLACE INTO Multiples (Ticker, Date, PE, PE_Rank, PS, PS_Rank)
+                        VALUES (?,?,?,?,?,?)''', (ticker, date, pe, per, ps, pes))
+        conn.commit()
+    
+    print(f'{ticker} is done', datetime.datetime.now(), '\n')
+    
+    conn.close()
+
+
+#populate table "Financials" with TTM values
+def populate_TTM(ticker):
+    
+    sql_db_name = 'stocks'
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
+    cur = conn.cursor()
+    
+    query = cur.execute('''select
+    Ticker,
+    P_Date,
+	Revenue,
+	sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
+	sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
+	NetIncome,
+    sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
+	sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS
+    from Financials
+	where Ticker = ?
+    order by P_Date DESC''', (ticker,)).fetchall()
+    
+    df_columns = ['Ticker', 'Date', 'Revenue', 'Revttm', 'SPS', 'NetIncome','NIttm', 'EPS']
+    df = pd.DataFrame(query, columns=df_columns)
+    df.set_index('Date', inplace=True)
+
+    for i in tqdm(range(df.shape[0])): #fh.shape[0]
+        date, rev_t, sps, inc_t, eps = df.index[i], df['Revttm'][i], df['SPS'][i], df['NIttm'][i], df['EPS'][i]
+
+        cur.execute('''UPDATE Financials SET RevTTM =:rev_t, SPS=:sps, NetIncomeTTM=:inc_t, EPS=:eps
+                        WHERE Ticker=:ticker AND P_Date=:Date''', dict(rev_t=rev_t, sps=sps, inc_t=inc_t, eps=eps, ticker=ticker, Date=date, ))
+        conn.commit()
+    
+    print(f'{ticker} is done', datetime.datetime.now(), '\n')
+    
+    conn.close()
