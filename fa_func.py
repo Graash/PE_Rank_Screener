@@ -6,6 +6,8 @@ import numpy as np
 from tqdm.notebook import tqdm
 import datetime
 
+tickers = si.tickers_sp500()
+
 #get only digits
 def get_digits(word):
     if type(word) == type(123.21):
@@ -41,10 +43,10 @@ def column_rank(df, column_name):
 
 #create a new sql_db with a certain name
 def create_sql_db(sql_db_name):
-    def create_connection(db_file):
+    def create_connection(sql_db_name):
         """ create a database connection to a SQLite database """
         try:
-            conn = sqlite3.connect(db_file)
+            conn = sqlite3.connect(sql_db_name)
             print(sqlite3.version)
         except Error as e:
             print(e)
@@ -52,17 +54,74 @@ def create_sql_db(sql_db_name):
             if conn:
                 conn.close()
     
-    if __name__ == '__main__':
-        create_connection(f"{db_file}.db")
+    create_connection(f"{sql_db_name}.sqlite")
+        
+    create_tables(sql_db_name)
 
         
 #create a table in a specific sqldb with certain parametres
-def create_table(sql_db_name,table_name, param_list, const_list=False):
+def create_tables(sql_db_name, const_list=False):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
-    cur = conn.cursor()   
-    cur.execute(f'''DROP TABLE IF EXISTS {table_name}''')
-    cur.execute(f'''CREATE TABLE {table_name} (id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT UNIQUE, Ticker TEXT)''')
+    cur = conn.cursor()
+    
+    #table Financials creating
+    cur.execute(f'''DROP TABLE IF EXISTS Financials''')
+    cur.execute(f'''CREATE TABLE Financials (
+                id	INTEGER NOT NULL UNIQUE,
+                Ticker	TEXT,
+                P_Date	TEXT,
+                Revenue	REAL,
+                RevTTM	REAL,
+                SPS	REAL,
+                NetIncome	REAL,
+                NetIncomeTTM	REAL,
+                EPS	REAL,
+                Shares	REAL,
+                UNIQUE("Ticker","P_Date"),
+                PRIMARY KEY("id" AUTOINCREMENT)
+                )''')
+    
+    print('Table Financials has been created')
+    
+    #table Multiples creating
+    cur.execute(f'''DROP TABLE IF EXISTS Multiples''')
+    cur.execute(f'''CREATE TABLE Multiples (
+                id	INTEGER NOT NULL UNIQUE,
+                Ticker	TEXT,
+                Date	TEXT,
+                PE	REAL,
+                PE_Rank	REAL,
+                PS	REAL,
+                PS_Rank	REAL,
+                RevGrowthAnnual5	REAL,
+                RevGrowthAnnual10	REAL,
+                RevGrowthAnnual15	REAL,
+                IncomeGrowthAnnual5	REAL,
+                IncomeGrowthAnnual10	REAL,
+                IncomeGrowthAnnual15	REAL,
+                PEG5	REAL,
+                PEG10	REAL,
+                PEG15	REAL,
+                UNIQUE("Ticker","Date"),
+                PRIMARY KEY("id" AUTOINCREMENT)
+                )''')
+    
+    print('Table Multiples has been created')
+    
+    #table Prices creating
+    cur.execute(f'''DROP TABLE IF EXISTS Prices''')
+    cur.execute(f'''CREATE TABLE Prices (
+                Ticker	TEXT,
+                MD_Date	TEXT,
+                Open	REAL,
+                High	REAL,
+                Low	REAL,
+                Close	REAL,
+                UNIQUE("Ticker","MD_Date")
+                )''')
+    
+    print('Table Prices has been created')
     
     conn.close()
     
@@ -120,7 +179,7 @@ def update_prices(sql_db_name, n=0):
 #update stock financials using macrotrends
 def update_financials_macrotrends(sql_db_name, n=0):
     
-    conn = sqlite3.connect('stocks.sqlite')
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     tickers = si.tickers_sp500()
     tickers = [item.replace(".", "-") for item in tickers] # Yahoo Finance uses dashes instead of dots
@@ -188,9 +247,8 @@ def update_financials_macrotrends(sql_db_name, n=0):
 
     
 #return relevant stock P/E rank    
-def get_stock_rank(ticker):
+def get_stock_rank(sql_db_name, ticker):
     
-    sql_db_name = 'stocks'
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     
@@ -236,8 +294,8 @@ def get_stock_rank(ticker):
     return df['P/E Rank'].plot()
     
 #return stock P/E chart    
-def get_stock_pe_chart(ticker):
-    sql_db_name = 'stocks'
+def get_stock_pe_chart(sql_db_name, ticker):
+    
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     
@@ -268,52 +326,61 @@ def get_stock_pe_chart(ticker):
 
 
 #populate table "Multiples" with calculated multipliers
-def populate_multiples(ticker):
+def populate_multiples(sql_db_name, n=0):
     
-    sql_db_name = 'stocks'
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     
-    query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, Close/SPS as PS, Close/EPS as PE
-    from (select
-    t1.Ticker,
-    t1.MD_Date,
-    t1.Close,
-	t2.P_Date,
-	first_value(t2.RevTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as RevTTM,
-	first_value(t2.SPS) over(partition by t2.P_Date order by t2.P_Date DESC) as SPS,
-	first_value(t2.NetIncomeTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as NetIncomeTTM,
-	first_value(t2.EPS) over(partition by t2.P_Date order by t2.P_Date DESC) as EPS
-    from Prices as t1, Financials as t2
-    where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ?
-    order by t1.MD_Date DESC, t2.P_Date DESC)
-    group by MD_Date
-    order by MD_Date desc''', (ticker,)).fetchall()
+    for ticker in tickers[n:]:
+        
+        position = tickers.index(ticker)
+        print(f'Got ticker {ticker}, element {position}')
     
-    df_columns = ['Ticker', 'Date', 'PeportMonth', 'P/S', 'P/E']
-    df = pd.DataFrame(query, columns=df_columns)
-    df.set_index('Date', inplace=True)
+        query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, Close/SPS as PS, Close/EPS as PE
+                            from (select
+                            t1.Ticker,
+                            t1.MD_Date,
+                            t1.Close,
+                            t2.P_Date,
+                            first_value(t2.RevTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as RevTTM,
+                            first_value(t2.SPS) over(partition by t2.P_Date order by t2.P_Date DESC) as SPS,
+                            first_value(t2.NetIncomeTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as NetIncomeTTM,
+                            first_value(t2.EPS) over(partition by t2.P_Date order by t2.P_Date DESC) as EPS
+                            from Prices as t1, Financials as t2
+                            where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ?
+                            order by t1.MD_Date DESC, t2.P_Date DESC)
+                            group by MD_Date
+                            order by MD_Date desc''', (ticker,)).fetchall()
+    
+        if query == []:
+            print(f'No data for {ticker}', '\n')
+            return
+    
+        df_columns = ['Ticker', 'Date', 'PeportMonth', 'P/S', 'P/E']
+        df = pd.DataFrame(query, columns=df_columns)
+        df.set_index('Date', inplace=True)
 
-    column_rank(df, 'P/S')
-    column_rank(df, 'P/E')
+        column_rank(df, 'P/S')
+        column_rank(df, 'P/E')
     
-    for i in tqdm(range(df.shape[0])): #fh.shape[0]
-        date, pe, per, ps, pes = df.index[i], df['P/E'][i], df['P/E Rank'][i], df['P/S'][i], df['P/S Rank'][i]
-        cur.execute('''INSERT OR REPLACE INTO Multiples (Ticker, Date, PE, PE_Rank, PS, PS_Rank)
-                        VALUES (?,?,?,?,?,?)''', (ticker, date, pe, per, ps, pes))
-        conn.commit()
+        for i in tqdm(range(df.shape[0])): #fh.shape[0]
+            date, pe, per, ps, pes = df.index[i], df['P/E'][i], df['P/E Rank'][i], df['P/S'][i], df['P/S Rank'][i]
+            cur.execute('''INSERT OR REPLACE INTO Multiples (Ticker, Date, PE, PE_Rank, PS, PS_Rank)
+                            VALUES (?,?,?,?,?,?)''', (ticker, date, pe, per, ps, pes))
+            conn.commit()
     
-    print(f'{ticker} is done', datetime.datetime.now(), '\n')
+        print(f'{ticker} is done', datetime.datetime.now(), '\n')
     
     conn.close()
 
 
 #populate table "Financials" with TTM values
-def populate_TTM(ticker):
+def populate_TTM(sql_db_name, ticker, n=0):
     
-    sql_db_name = 'stocks'
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
+    
+    print(f'Got ticker {ticker}')
     
     query = cur.execute('''select
     Ticker,
