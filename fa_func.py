@@ -5,8 +5,10 @@ import pandas as pd
 import numpy as np
 from tqdm.notebook import tqdm
 import datetime
+import time
 
 tickers = si.tickers_sp500()
+sql_db_name_def = 'stocks'
 
 #get only digits
 def get_digits(word):
@@ -60,7 +62,7 @@ def create_sql_db(sql_db_name):
 
         
 #create a table in a specific sqldb with certain parametres
-def create_tables(sql_db_name, const_list=False):
+def create_tables(sql_db_name = sql_db_name_def, const_list=False):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -127,7 +129,7 @@ def create_tables(sql_db_name, const_list=False):
     
 
 #update daily stock prices
-def update_prices(sql_db_name, n=0):
+def update_prices(sql_db_name = sql_db_name_def, n=0):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -177,7 +179,7 @@ def update_prices(sql_db_name, n=0):
 
 
 #update stock financials using macrotrends
-def update_financials_macrotrends(sql_db_name, n=0):
+def update_financials_macrotrends(sql_db_name = sql_db_name_def, n=0):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -247,7 +249,7 @@ def update_financials_macrotrends(sql_db_name, n=0):
 
     
 #return relevant stock P/E rank    
-def get_stock_rank(sql_db_name, ticker):
+def get_stock_rank(ticker, sql_db_name = sql_db_name_def):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -294,7 +296,7 @@ def get_stock_rank(sql_db_name, ticker):
     return df['P/E Rank'].plot()
     
 #return stock P/E chart    
-def get_stock_pe_chart(sql_db_name, ticker):
+def get_stock_pe_chart(ticker, sql_db_name = sql_db_name_def):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -326,7 +328,7 @@ def get_stock_pe_chart(sql_db_name, ticker):
 
 
 #populate table "Multiples" with calculated multipliers
-def populate_multiples(sql_db_name, n=0):
+def populate_multiples(sql_db_name = sql_db_name_def, n=0):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -336,7 +338,7 @@ def populate_multiples(sql_db_name, n=0):
         position = tickers.index(ticker)
         print(f'Got ticker {ticker}, element {position}')
     
-        query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, Close/SPS as PS, Close/EPS as PE
+        query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, CASE WHEN SPS=0 THEN 0 ELSE Close/SPS END as PS, CASE WHEN EPS=0 THEN 0 ELSE Close/EPS END as PE
                             from (select
                             t1.Ticker,
                             t1.MD_Date,
@@ -375,37 +377,121 @@ def populate_multiples(sql_db_name, n=0):
 
 
 #populate table "Financials" with TTM values
-def populate_TTM(sql_db_name, ticker, n=0):
+def populate_TTM(ticker, n=0, sql_db_name = sql_db_name_def):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     
     print(f'Got ticker {ticker}')
     
-    query = cur.execute('''select
-    Ticker,
-    P_Date,
-	Revenue,
-	sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
-	sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
-	NetIncome,
-    sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
-	sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS
-    from Financials
-	where Ticker = ?
-    order by P_Date DESC''', (ticker,)).fetchall()
+    for ticker in tickers():
+        query = cur.execute('''select
+        Ticker,
+        P_Date,
+        Revenue,
+        sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
+        sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
+        NetIncome,
+        sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
+        sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS
+        from Financials
+        where Ticker = ?
+        order by P_Date DESC''', (ticker,)).fetchall()
     
-    df_columns = ['Ticker', 'Date', 'Revenue', 'Revttm', 'SPS', 'NetIncome','NIttm', 'EPS']
-    df = pd.DataFrame(query, columns=df_columns)
-    df.set_index('Date', inplace=True)
+        df_columns = ['Ticker', 'Date', 'Revenue', 'Revttm', 'SPS', 'NetIncome','NIttm', 'EPS']
+        df = pd.DataFrame(query, columns=df_columns)
+        df.set_index('Date', inplace=True)
 
-    for i in tqdm(range(df.shape[0])): #fh.shape[0]
-        date, rev_t, sps, inc_t, eps = df.index[i], df['Revttm'][i], df['SPS'][i], df['NIttm'][i], df['EPS'][i]
+        for i in tqdm(range(df.shape[0])): #fh.shape[0]
+            date, rev_t, sps, inc_t, eps = df.index[i], df['Revttm'][i], df['SPS'][i], df['NIttm'][i], df['EPS'][i]
 
-        cur.execute('''UPDATE Financials SET RevTTM =:rev_t, SPS=:sps, NetIncomeTTM=:inc_t, EPS=:eps
-                        WHERE Ticker=:ticker AND P_Date=:Date''', dict(rev_t=rev_t, sps=sps, inc_t=inc_t, eps=eps, ticker=ticker, Date=date, ))
-        conn.commit()
+            cur.execute('''UPDATE Financials SET RevTTM =:rev_t, SPS=:sps, NetIncomeTTM=:inc_t, EPS=:eps
+                            WHERE Ticker=:ticker AND P_Date=:Date''', dict(rev_t=rev_t, sps=sps, inc_t=inc_t, eps=eps, ticker=ticker, Date=date, ))
+            conn.commit()
     
-    print(f'{ticker} is done', datetime.datetime.now(), '\n')
+        print(f'{ticker} is done', datetime.datetime.now(), '\n')
     
     conn.close()
+    
+
+#set all null_values to zero
+def null_to_zero(column_name, sql_db_name = sql_db_name_def):
+    
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
+    cur = conn.cursor()
+    
+    query = cur.execute(f'''select *
+                        from Multiples
+                        where {column_name} is NULL
+                        order by Date''').fetchall()
+        
+    for i in tqdm(range(len(query))):
+        
+        cur.execute(f'''UPDATE Multiples SET {column_name}=0 WHERE id=?''', (lane[0],))
+        conn.commit()
+    
+    conn.close()
+
+
+#update rows with null ranks
+def update_null_ranks(sql_db_name = sql_db_name_def):
+    
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
+    cur = conn.cursor()
+    
+    tickers_without_pe = cur.execute('''select Ticker
+                        from Multiples
+                        where PS_Rank is NULL OR PE_Rank is NULL
+                        group by Ticker
+                        order by Date''').fetchall()
+    
+    for ticker in tickers_without_pe:
+    
+        position = tickers_without_pe.index(ticker)
+        print(f'Got ticker {ticker}, element {position}')
+        
+        query = cur.execute('''select id, Ticker, PE, PS
+                from Multiples
+                where Ticker=?
+                order by Date''', (ticker[0], )).fetchall()
+        
+        df_columns = ['id', 'Ticker', 'P/S', 'P/E']
+        df = pd.DataFrame(query, columns=df_columns)
+        
+        column_rank(df, 'P/S')
+        column_rank(df, 'P/E')
+        
+        for i in tqdm(range(df.shape[0])): #df.shape[0]
+            psrank, perank, id_r = float(df.loc[i, 'P/S Rank']), float(df.loc[i, 'P/E Rank']), int(df.loc[i, 'id'])
+            cur.execute('''update Multiples set PS_Rank=?, PE_Rank=? where id=?''', (psrank, perank, id_r, ))
+            conn.commit()
+            
+        print(f'{ticker} is done', datetime.datetime.now(), '\n')
+    
+    conn.close()
+        
+
+#get all stocks with pe, pe rank, ps, ps rank
+def get_mult_ranks(sql_db_name=sql_db_name_def):
+    
+    conn = sqlite3.connect(f'stocks.sqlite')
+    cur = conn.cursor()
+    
+    query = cur.execute('''select * 
+                        from (select
+                        Ticker, 
+                        first_value(Date) over(partition by Ticker order by Date DESC) as Date,
+                        round(first_value(PS_Rank) over(partition by Ticker order by Date DESC),4)*100 as PS_Rank,
+                        round(first_value(PE_Rank) over(partition by Ticker order by Date DESC),4)*100 as PE_Rank
+                        from Multiples)
+                        group by Ticker
+                        order by PE_Rank''').fetchall()
+
+    db_columns = ['Ticker', 'Date', 'P/S Rank', 'P/E Rank']
+    db = pd.DataFrame(query)    
+    db.columns = db_columns  
+    
+    conn.close()
+    
+    return db
+    
