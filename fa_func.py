@@ -21,7 +21,7 @@ def get_digits(word):
     only_digits = ''
     for i in range(0, len(word)):
         letter = word[i]
-        if word[i].isdigit():
+        if word[i].isdigit() or word[i]=='-':
             only_digits = only_digits + word[i]
             
     return int(only_digits)
@@ -481,13 +481,15 @@ def get_mult_ranks(sql_db_name=sql_db_name_def):
                         from (select
                         Ticker, 
                         first_value(Date) over(partition by Ticker order by Date DESC) as Date,
+                        first_value(PS) over(partition by Ticker order by Date DESC) as PS,
                         round(first_value(PS_Rank) over(partition by Ticker order by Date DESC),4)*100 as PS_Rank,
+                        first_value(PE) over(partition by Ticker order by Date DESC) as PE,
                         round(first_value(PE_Rank) over(partition by Ticker order by Date DESC),4)*100 as PE_Rank
                         from Multiples)
                         group by Ticker
                         order by PE_Rank''').fetchall()
 
-    db_columns = ['Ticker', 'Date', 'P/S Rank', 'P/E Rank']
+    db_columns = ['Ticker', 'Date', 'PS', 'PS Rank', 'PE', 'PE Rank']
     db = pd.DataFrame(query)    
     db.columns = db_columns  
     
