@@ -6,6 +6,9 @@ import numpy as np
 from tqdm.notebook import tqdm
 import datetime
 import time
+import requests
+from bs4 import BeautifulSoup as bs
+
 
 tickers = si.tickers_sp500()
 sql_db_name_def = 'stocks'
@@ -30,7 +33,7 @@ def get_digits(word):
 #make a column in df with a rank of another column
 def column_rank(df, column_name):
     max_r = np.percentile(df[column_name], 95)
-    min_r = df[column_name].min()
+    min_r = df[df[column_name] > 0][column_name].min()
 
     for index, row in df.iterrows():
         cur_pe = df.loc[index, column_name]
@@ -147,7 +150,7 @@ def update_prices(sql_db_name = sql_db_name_def, n=0):
         print(f'Got ticker {ticker}, element {position}')
     
         #get the last saved data of this ticker
-        cur.execute('SELECT * FROM Prices WHERE ticker = ? ORDER BY Prices.Date DESC', (ticker, ))
+        cur.execute('SELECT * FROM Prices WHERE ticker = ? ORDER BY Prices.Date DESC LIMIT 1', (ticker, ))
         query_list = cur.fetchall()
         if query_list == []:
             start_date = datetime.date.today() - datetime.timedelta(days = 25*365)
@@ -231,12 +234,11 @@ def update_financials_macrotrends(sql_db_name = sql_db_name_def, n=0):
             date, sh = date.get_text(), sh.get_text()
             df.loc[date, 'Shares'] = sh
     
-        if ticker == 'BRK.B':
-            ticker = 'BRK-B'
+        ticker = ticker.replace(".", "-")
     
         for i in tqdm(range(df.shape[0])): #fh.shape[0]
             date, r, n, s = df.index[i], get_digits(df['Revenue'][i]), get_digits(df['Income'][i]), get_digits(df['Shares'][i])
-            cur.execute('''INSERT OR REPLACE INTO Financials (Ticker, Date, Revenue, NetIncome, Shares)
+            cur.execute('''INSERT OR REPLACE INTO Financials (Ticker, P_Date, Revenue, NetIncome, Shares)
                         VALUES (?,?,?,?,?)''', (ticker, date, r, n, s, ))
             conn.commit()
         print(f'{ticker} is done', datetime.datetime.now(), '\n')
@@ -337,7 +339,10 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
         
         position = tickers.index(ticker)
         print(f'Got ticker {ticker}, element {position}')
-    
+        
+        last_date = cur.execute('SELECT Date FROM Multiples WHERE ticker = ? ORDER BY Prices.Date DESC LIMIT 1', (ticker, )).fetchall()[0][0]
+        
+        
         query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, CASE WHEN SPS=0 THEN 0 ELSE Close/SPS END as PS, CASE WHEN EPS=0 THEN 0 ELSE Close/EPS END as PE
                             from (select
                             t1.Ticker,
@@ -349,10 +354,10 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
                             first_value(t2.NetIncomeTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as NetIncomeTTM,
                             first_value(t2.EPS) over(partition by t2.P_Date order by t2.P_Date DESC) as EPS
                             from Prices as t1, Financials as t2
-                            where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ?
+                            where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ? and t1.Prices >=?
                             order by t1.MD_Date DESC, t2.P_Date DESC)
                             group by MD_Date
-                            order by MD_Date desc''', (ticker,)).fetchall()
+                            order by MD_Date desc''', (ticker,last_date,)).fetchall()
     
         if query == []:
             print(f'No data for {ticker}', '\n')
@@ -377,15 +382,17 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
 
 
 #populate table "Financials" with TTM values
-def populate_TTM(ticker, n=0, sql_db_name = sql_db_name_def):
+def populate_TTM(n=0, sql_db_name = sql_db_name_def):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     
-    print(f'Got ticker {ticker}')
-    
-    for ticker in tickers():
+    for ticker in tickers:
+        position = tickers.index(ticker)
+        print(f'Got ticker {ticker}, element {position}')
+        
         query = cur.execute('''select
+        id,
         Ticker,
         P_Date,
         Revenue,
@@ -398,15 +405,15 @@ def populate_TTM(ticker, n=0, sql_db_name = sql_db_name_def):
         where Ticker = ?
         order by P_Date DESC''', (ticker,)).fetchall()
     
-        df_columns = ['Ticker', 'Date', 'Revenue', 'Revttm', 'SPS', 'NetIncome','NIttm', 'EPS']
+        df_columns = ['id', 'Ticker', 'Date', 'Revenue', 'Revttm', 'SPS', 'NetIncome','NIttm', 'EPS']
         df = pd.DataFrame(query, columns=df_columns)
         df.set_index('Date', inplace=True)
 
         for i in tqdm(range(df.shape[0])): #fh.shape[0]
-            date, rev_t, sps, inc_t, eps = df.index[i], df['Revttm'][i], df['SPS'][i], df['NIttm'][i], df['EPS'][i]
+            date, rev_t, sps, inc_t, eps, id_r = df.index[i], df['Revttm'][i], df['SPS'][i], df['NIttm'][i], df['EPS'][i], int(df['id'][i])
 
             cur.execute('''UPDATE Financials SET RevTTM =:rev_t, SPS=:sps, NetIncomeTTM=:inc_t, EPS=:eps
-                            WHERE Ticker=:ticker AND P_Date=:Date''', dict(rev_t=rev_t, sps=sps, inc_t=inc_t, eps=eps, ticker=ticker, Date=date, ))
+                            WHERE id=:id_r''', dict(rev_t=rev_t, sps=sps, inc_t=inc_t, eps=eps, ticker=ticker, Date=date, id_r=id_r, ))
             conn.commit()
     
         print(f'{ticker} is done', datetime.datetime.now(), '\n')
