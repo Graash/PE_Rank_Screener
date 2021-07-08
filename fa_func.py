@@ -150,7 +150,7 @@ def update_prices(sql_db_name = sql_db_name_def, n=0):
         print(f'Got ticker {ticker}, element {position}')
     
         #get the last saved data of this ticker
-        cur.execute('SELECT * FROM Prices WHERE ticker = ? ORDER BY Prices.Date DESC LIMIT 1', (ticker, ))
+        cur.execute('SELECT * FROM Prices WHERE ticker = ? ORDER BY Prices.MD_Date DESC LIMIT 1', (ticker, ))
         query_list = cur.fetchall()
         if query_list == []:
             start_date = datetime.date.today() - datetime.timedelta(days = 25*365)
@@ -397,8 +397,7 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
         position = tickers.index(ticker)
         print(f'Got ticker {ticker}, element {position}')
         
-        last_date = cur.execute('SELECT Date FROM Multiples WHERE ticker = ? ORDER BY Prices.Date DESC LIMIT 1', (ticker, )).fetchall()[0][0]
-        
+        last_date = cur.execute('SELECT Date FROM Multiples WHERE ticker = ? ORDER BY Multiples.Date DESC LIMIT 1', (ticker, )).fetchall()[0][0]
         
         query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, CASE WHEN SPS=0 THEN 0 ELSE Close/SPS END as PS, CASE WHEN EPS=0 THEN 0 ELSE Close/EPS END as PE
                             from (select
@@ -434,6 +433,57 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
             conn.commit()
     
         print(f'{ticker} is done', datetime.datetime.now(), '\n')
+    
+    print("------------------------------------------")
+    print("EVERYTHIN IS DONE")
+    print("------------------------------------------")
+    
+    conn.close()
+    
+#populate table "Multiples" with specific ticker
+def populate_multiples_with_ticker(ticker, sql_db_name = sql_db_name_def, n=0):
+    
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
+    cur = conn.cursor()
+        
+    print(f'Got ticker {ticker}')
+
+    query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth,
+                        CASE WHEN SPS=0 THEN 0 WHEN SPS < 0 THEN 0 ELSE Close/SPS END as PS,
+                        CASE WHEN EPS=0 THEN 0 WHEN EPS < 0 THEN 0 ELSE Close/EPS END as PE
+                        from (select
+                        t1.Ticker,
+                        t1.MD_Date,
+                        t1.Close,
+                        t2.P_Date,
+                        first_value(t2.RevTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as RevTTM,
+                        first_value(t2.SPS) over(partition by t2.P_Date order by t2.P_Date DESC) as SPS,
+                        first_value(t2.NetIncomeTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as NetIncomeTTM,
+                        first_value(t2.EPS) over(partition by t2.P_Date order by t2.P_Date DESC) as EPS
+                        from Prices as t1, Financials as t2
+                        where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ?
+                        order by t1.MD_Date DESC, t2.P_Date DESC)
+                        group by MD_Date
+                        order by MD_Date desc''', (ticker, )).fetchall()
+
+    if query == []:
+        print(f'No data for {ticker}', '\n')
+        conn.close()
+        return
+
+    df_columns = ['Ticker', 'Date', 'PeportMonth', 'P/S', 'P/E']
+    df = pd.DataFrame(query, columns=df_columns)
+    df.set_index('Date', inplace=True)
+
+    column_rank(df, 'P/S')
+    column_rank(df, 'P/E')
+
+    for i in tqdm(range(df.shape[0])): #fh.shape[0]
+        date, pe, per, ps, pes = df.index[i], df['P/E'][i], df['P/E Rank'][i], df['P/S'][i], df['P/S Rank'][i]
+        cur.execute('''update Multiples set PS=?, PS_Rank=?, PE=?, PE_Rank=? where Ticker=? and Date=?''', (ps, pes, pe, per, ticker, date, ))
+        conn.commit()
+
+    print(f'{ticker} is done', datetime.datetime.now(), '\n')
     
     print("------------------------------------------")
     print("EVERYTHIN IS DONE")
@@ -488,19 +538,24 @@ def populate_TTM_with_ticker(ticker, n=0, sql_db_name = sql_db_name_def):
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
 
-    query = cur.execute('''select
-    id,
-    Ticker,
-    P_Date,
-    Revenue,
-    sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
-    sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
-    NetIncome,
-    sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
-    sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS
-    from Financials
-    where Ticker = ?
-    order by P_Date DESC''', (ticker,)).fetchall()
+    query = cur.execute('''select id, Ticker, P_Date, Revenue, Revttm, 
+		case when Revttm <= 0 then 0 else Revttm/Shares end as SPS,
+        NetIncome, NIttm,
+		case when NIttm <= 0 then 0 else NIttm/Shares end as SPS
+        from (select
+        id,
+        Ticker,
+        P_Date,
+        Revenue,
+        sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
+        sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
+        NetIncome,
+        sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
+        sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS,
+		Shares
+        from Financials
+        where Ticker = ?
+        order by P_Date DESC)''', (ticker,)).fetchall()
 
     df_columns = ['id', 'Ticker', 'Date', 'Revenue', 'Revttm', 'SPS', 'NetIncome','NIttm', 'EPS']
     df = pd.DataFrame(query, columns=df_columns)
@@ -550,7 +605,7 @@ def get_mult_ranks(sql_db_name=sql_db_name_def):
 ###################################################
 
 #update all stocks with bad shares
-def update_stocks_with_shares_errors(sql_db_name = sql_db_name_def):
+def update_errors_shares(sql_db_name = sql_db_name_def):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -604,7 +659,7 @@ def null_to_zero(table, column_name, sql_db_name = sql_db_name_def):
     
     
 #update rows with null ranks
-def update_null_ranks(sql_db_name = sql_db_name_def):
+def update_errors_null_ranks(sql_db_name = sql_db_name_def):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -652,4 +707,38 @@ def update_errors_ttm_sps_eps(sql_db_name = sql_db_name_def):
     for ticker in tickers_wtih_mistakes:
         populate_TTM_with_ticker(ticker[0])
         
+    conn.close()
+    
+    
+#update all bad PE_Rank and PS_Rank
+def update_errors_PSR_PER(sql_db_name = sql_db_name_def):
+    
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
+    cur = conn.cursor()
+    
+    tickers_wtih_mistakes = cur.execute('''select Ticker from Multiples where PS_Rank is NULL or PE_Rank is NULL group by Ticker''').fetchall()
+    
+    for ticker in tickers_wtih_mistakes:
+        populate_multiples_with_ticker(ticker[0])
+        
+    conn.close()
+    
+    
+#update all rows with negative eps and sps
+def update_errors_negative_eps_sps(sql_db_name = sql_db_name_def):
+    
+    conn = sqlite3.connect(f'{sql_db_name}.sqlite')
+    cur = conn.cursor()
+    
+    tickers_wtih_mistakes = cur.execute('''select Ticker from Financials where SPS < 0 or EPS < 0 group by Ticker''').fetchall()
+    
+    for ticker in tickers_wtih_mistakes:
+        
+        print(f'starting work with {ticker[0]}')
+        
+        populate_TTM_with_ticker(ticker[0])
+        populate_multiples_with_ticker(ticker[0])
+        
+        print(f'errors in {ticker[0]} has been elmininated')
+    
     conn.close()
