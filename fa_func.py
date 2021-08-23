@@ -8,6 +8,7 @@ import datetime
 import time
 import requests
 from bs4 import BeautifulSoup as bs
+from pandas_datareader import data as pdr
 
 
 tickers = si.tickers_sp500()
@@ -187,61 +188,62 @@ def update_financials_macrotrends(sql_db_name = sql_db_name_def, n=0):
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     tickers = si.tickers_sp500()
-    tickers = [item.replace(".", "-") for item in tickers] # Yahoo Finance uses dashes instead of dots
+    tickers = [item.replace("-", ".") for item in tickers]
     index_name = '^GSPC' # S&P 500
     end_date = datetime.date.today()
     
     for ticker in tickers[n:]:
-        #show current position
-        position = tickers.index(ticker)
-        if ticker == 'BRK-B':
-            ticker = 'BRK.B'
-        print(f'Got ticker {ticker}, element {position}')
-        df = pd.DataFrame(columns=['Date', 'Revenue', 'Income', 'Shares'])
-    
-        r = requests.get(f"https://www.macrotrends.net/stocks/charts/{ticker}")
-        url = r.url
-        time.sleep(1)
-    
-        #get the revenue data since the last saved date
-        r = requests.get(f"{url}revenue")
-        time.sleep(1)
-        bs_r = bs(r.content, 'html.parser')
-        for row in bs_r.find_all('table', attrs={'class':'historical_data_table table'})[1].find('tbody').find_all('tr'):
-            date, rev = row.find_all('td')
-            date, rev = date.get_text(), rev.get_text()
-            new_row = pd.Series({'Date':date, "Revenue":rev,"Income":'',"Shares":''})
-            df = df.append(new_row, ignore_index=True)
-        
-        #set dates as index
-        df.set_index('Date', inplace=True)
-    
-        #get the income data since the last saved date
-        r = requests.get(f"{url}net-income")
-        time.sleep(1)
-        bs_i = bs(r.content, 'html.parser')
-        for row in bs_i.find_all('table', attrs={'class':'historical_data_table table'})[1].find('tbody').find_all('tr'):
-            date, inc = row.find_all('td')
-            date, inc = date.get_text(), inc.get_text()
-            df.loc[date, 'Income'] = inc
-    
-        #get the shares data since the last saved date
-        r = requests.get(f"{url}shares-outstanding")
-        time.sleep(1)
-        bs_s = bs(r.content, 'html.parser')
-        for row in bs_s.find_all('table', attrs={'class':'historical_data_table table'})[1].find('tbody').find_all('tr'):
-            date, sh = row.find_all('td')
-            date, sh = date.get_text(), sh.get_text()
-            df.loc[date, 'Shares'] = sh
-    
-        ticker = ticker.replace(".", "-")
-    
-        for i in tqdm(range(df.shape[0])): #fh.shape[0]
-            date, r, n, s = df.index[i], get_digits(df['Revenue'][i]), get_digits(df['Income'][i]), get_digits(df['Shares'][i])
-            cur.execute('''INSERT OR REPLACE INTO Financials (Ticker, P_Date, Revenue, NetIncome, Shares)
-                        VALUES (?,?,?,?,?)''', (ticker, date, r, n, s, ))
-            conn.commit()
-        print(f'{ticker} is done', datetime.datetime.now(), '\n')
+        try:
+            #show current position
+            position = tickers.index(ticker)
+            print(f'Got ticker {ticker}, element {position}')
+            df = pd.DataFrame(columns=['Date', 'Revenue', 'Income', 'Shares'])
+
+            r = requests.get(f"https://www.macrotrends.net/stocks/charts/{ticker}")
+            url = r.url
+            time.sleep(1)
+
+            #get the revenue data since the last saved date
+            r = requests.get(f"{url}revenue")
+            time.sleep(1)
+            bs_r = bs(r.content, 'html.parser')
+            for row in bs_r.find_all('table', attrs={'class':'historical_data_table table'})[1].find('tbody').find_all('tr'):
+                date, rev = row.find_all('td')
+                date, rev = date.get_text(), rev.get_text()
+                new_row = pd.Series({'Date':date, "Revenue":rev,"Income":'',"Shares":''})
+                df = df.append(new_row, ignore_index=True)
+
+            #set dates as index
+            df.set_index('Date', inplace=True)
+
+            #get the income data since the last saved date
+            r = requests.get(f"{url}net-income")
+            time.sleep(1)
+            bs_i = bs(r.content, 'html.parser')
+            for row in bs_i.find_all('table', attrs={'class':'historical_data_table table'})[1].find('tbody').find_all('tr'):
+                date, inc = row.find_all('td')
+                date, inc = date.get_text(), inc.get_text()
+                df.loc[date, 'Income'] = inc
+
+            #get the shares data since the last saved date
+            r = requests.get(f"{url}shares-outstanding")
+            time.sleep(1)
+            bs_s = bs(r.content, 'html.parser')
+            for row in bs_s.find_all('table', attrs={'class':'historical_data_table table'})[1].find('tbody').find_all('tr'):
+                date, sh = row.find_all('td')
+                date, sh = date.get_text(), sh.get_text()
+                df.loc[date, 'Shares'] = sh
+
+            ticker = ticker.replace(".", "-")
+
+            for i in tqdm(range(df.shape[0])): #fh.shape[0]
+                date, r, n, s = df.index[i], get_digits(df['Revenue'][i]), get_digits(df['Income'][i]), get_digits(df['Shares'][i])
+                cur.execute('''INSERT OR IGNORE INTO Financials (Ticker, P_Date, Revenue, NetIncome, Shares)
+                            VALUES (?,?,?,?,?)''', (ticker, date, r, n, s, ))
+                conn.commit()
+            print(f'{ticker} is done', datetime.datetime.now(), '\n')
+        except:
+            print(f'Something went wrong with {ticker}', format)
     
     print("------------------------------------------")
     print("EVERYTHIN IS DONE")
@@ -382,12 +384,15 @@ def get_stock_pe_chart(ticker, sql_db_name = sql_db_name_def):
     df = df.sort_index()
     
     conn.close()
+    chart = df['P/E'].plot()
     
-    return df['P/E'].plot()
+    return df, chart
 
 
 #populate table "Multiples" with calculated multipliers
-def populate_multiples(sql_db_name = sql_db_name_def, n=0):
+#numbers are not 100% right due to 95% decile
+#force "recalculate all" to obtain the most accurate data
+def populate_multiples(sql_db_name = sql_db_name_def, n=0, recalculate_all=False):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -397,9 +402,9 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
         position = tickers.index(ticker)
         print(f'Got ticker {ticker}, element {position}')
         
-        last_date = cur.execute('SELECT Date FROM Multiples WHERE ticker = ? ORDER BY Multiples.Date DESC LIMIT 1', (ticker, )).fetchall()[0][0]
-        
-        query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth, CASE WHEN SPS=0 THEN 0 ELSE Close/SPS END as PS, CASE WHEN EPS=0 THEN 0 ELSE Close/EPS END as PE
+        query = cur.execute('''select Ticker, MD_Date as Date, max(P_Date) as PeportMonth,
+                            CASE WHEN SPS=0 THEN 0 ELSE Close/SPS END as PS,
+                            CASE WHEN EPS=0 THEN 0 ELSE Close/EPS END as PE
                             from (select
                             t1.Ticker,
                             t1.MD_Date,
@@ -410,10 +415,10 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
                             first_value(t2.NetIncomeTTM) over(partition by t2.P_Date order by t2.P_Date DESC) as NetIncomeTTM,
                             first_value(t2.EPS) over(partition by t2.P_Date order by t2.P_Date DESC) as EPS
                             from Prices as t1, Financials as t2
-                            where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ? and t1.MD_Date >=?
+                            where t1.Ticker = t2.Ticker and t2.P_Date <= t1.MD_Date and t1.Ticker = ?
                             order by t1.MD_Date DESC, t2.P_Date DESC)
                             group by MD_Date
-                            order by MD_Date desc''', (ticker,last_date,)).fetchall()
+                            order by MD_Date desc''', (ticker,)).fetchall()
     
         if query == []:
             print(f'No data for {ticker}', '\n')
@@ -425,10 +430,12 @@ def populate_multiples(sql_db_name = sql_db_name_def, n=0):
 
         column_rank(df, 'P/S')
         column_rank(df, 'P/E')
-    
+        
+        switcher = "REPLACE" if recalculate_all is True else "IGNORE"
+        
         for i in tqdm(range(df.shape[0])): #fh.shape[0]
             date, pe, per, ps, pes = df.index[i], df['P/E'][i], df['P/E Rank'][i], df['P/S'][i], df['P/S Rank'][i]
-            cur.execute('''INSERT OR REPLACE INTO Multiples (Ticker, Date, PE, PE_Rank, PS, PS_Rank)
+            cur.execute(f'''INSERT OR {switcher} INTO Multiples (Ticker, Date, PE, PE_Rank, PS, PS_Rank)
                             VALUES (?,?,?,?,?,?)''', (ticker, date, pe, per, ps, pes))
             conn.commit()
     
@@ -493,7 +500,7 @@ def populate_multiples_with_ticker(ticker, sql_db_name = sql_db_name_def, n=0):
 
 
 #populate table "Financials" with TTM values
-def populate_TTM(n=0, sql_db_name = sql_db_name_def):
+def populate_TTM(n=0, sql_db_name = sql_db_name_def, only_null=False):
     
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
@@ -502,19 +509,50 @@ def populate_TTM(n=0, sql_db_name = sql_db_name_def):
         position = tickers.index(ticker)
         print(f'Got ticker {ticker}, element {position}')
         
-        query = cur.execute('''select
-        id,
-        Ticker,
-        P_Date,
-        Revenue,
-        sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
-        sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
-        NetIncome,
-        sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
-        sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS
-        from Financials
-        where Ticker = ?
-        order by P_Date DESC''', (ticker,)).fetchall()
+        if only_null == False:
+            query = cur.execute('''select id, Ticker, P_Date, Revenue, Revttm, 
+                case when Revttm <= 0 then 0 else Revttm/Shares end as SPS,
+                NetIncome, NIttm,
+                case when NIttm <= 0 then 0 else NIttm/Shares end as EPS
+                from (select
+                id,
+                Ticker,
+                P_Date,
+                Revenue,
+                sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
+                sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
+                NetIncome,
+                sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
+                sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS,
+                Shares
+                from Financials
+                where Ticker = ?
+                order by P_Date DESC)
+            ''', (ticker,)).fetchall()
+        else:
+            query = cur.execute('''select id, Ticker, P_Date, Revenue, Revttm,
+                case when Revttm <= 0 then 0 else Revttm/Shares end as SPS, NetIncome, NIttm,
+                case when NIttm <= 0 then 0 else NIttm/Shares end as EPS
+                from
+                (select
+                id,
+                Ticker,
+                P_Date,
+                Revenue,
+                sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as Revttm,
+                sum(Revenue) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as SPS,
+                NetIncome,
+                sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) as NIttm,
+                sum(NetIncome) over(order by P_Date rows BETWEEN  3 PRECEDING AND CURRENT ROW) / Shares as EPS,
+                RevTTM as rev_def,
+                SPS as sps_def,
+                NetIncomeTTM as nittm_def,
+                EPS as eps_def
+                from Financials
+                where Ticker = ?
+                order by P_Date DESC)
+                where rev_def is null or sps_def is NULL or nittm_def is null or eps_def is null
+            ''', (ticker,)).fetchall()
     
         df_columns = ['id', 'Ticker', 'Date', 'Revenue', 'Revttm', 'SPS', 'NetIncome','NIttm', 'EPS']
         df = pd.DataFrame(query, columns=df_columns)
@@ -541,7 +579,7 @@ def populate_TTM_with_ticker(ticker, n=0, sql_db_name = sql_db_name_def):
     query = cur.execute('''select id, Ticker, P_Date, Revenue, Revttm, 
 		case when Revttm <= 0 then 0 else Revttm/Shares end as SPS,
         NetIncome, NIttm,
-		case when NIttm <= 0 then 0 else NIttm/Shares end as SPS
+		case when NIttm <= 0 then 0 else NIttm/Shares end as EPS
         from (select
         id,
         Ticker,
@@ -598,6 +636,23 @@ def get_mult_ranks(sql_db_name=sql_db_name_def):
     conn.close()
     
     return db
+
+
+#update all financial data
+#could take some time to complete
+def update_financial_data():
+    
+    #update stock prices
+    update_prices()
+    
+    #update basic financial information
+    update_financials_macrotrends()
+    
+    #update ttm fields for all new rows
+    populate_TTM(only_null=True)
+    
+    #update pe, ps and so on
+    populate_multiples()
 
 
 ###################################################
@@ -730,7 +785,7 @@ def update_errors_negative_eps_sps(sql_db_name = sql_db_name_def):
     conn = sqlite3.connect(f'{sql_db_name}.sqlite')
     cur = conn.cursor()
     
-    tickers_wtih_mistakes = cur.execute('''select Ticker from Financials where SPS < 0 or EPS < 0 group by Ticker''').fetchall()
+    tickers_wtih_mistakes = cur.execute('''select Ticker from Financials where SPS < 0 or EPS < 0 or SPS is null or EPS is null group by Ticker''').fetchall()
     
     for ticker in tickers_wtih_mistakes:
         
